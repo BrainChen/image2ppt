@@ -16,13 +16,17 @@ def strip_json_fence(text: str) -> str:
 def extract_json_object(text: str) -> dict[str, Any]:
     value = strip_json_fence(text)
     try:
-        parsed = json.loads(value)
+        parsed = _loads_model_json(value)
     except json.JSONDecodeError:
-        parsed = json.loads(_first_balanced_json(value))
+        parsed = _loads_model_json(_first_balanced_json(value))
 
     if not isinstance(parsed, dict):
         raise ValueError("Expected model output to be a JSON object")
     return parsed
+
+
+def _loads_model_json(value: str) -> Any:
+    return json.loads(value, strict=False)
 
 
 def _first_balanced_json(text: str) -> str:

@@ -65,7 +65,9 @@ Build a hierarchy tree with maximum depth 3.
 Rules:
 - bbox MUST be [x, y, width, height], not [x1, y1, x2, y2].
 - width = right - left, height = bottom - top.
-- Coordinates MUST use the original image pixel space IMAGE_WIDTH x IMAGE_HEIGHT, not a 0-1000 or normalized coordinate space.
+- Coordinates MUST use the original image pixel space IMAGE_WIDTH x IMAGE_HEIGHT, origin at top-left.
+- Do NOT output coordinates from a 0-1000, normalized, resized, or display coordinate space.
+- If you estimate positions on any temporary grid, convert every bbox back to original image pixels before output.
 - Prefer editable text and editable boxes over screenshot crops.
 - Use type "image" for logos, icons, photos, complex diagrams, and shapes that are too hard to reconstruct.
 - Do not invent invisible elements.

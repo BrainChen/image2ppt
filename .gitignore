@@ -11,6 +11,7 @@ outputs/intermediates/*
 outputs/logs/*
 outputs/ppt/*.pptx
 outputs/uploads/*
+outputs/*.pptx
 !outputs/ast/.gitkeep
 !outputs/crops/.gitkeep
 !outputs/intermediates/.gitkeep

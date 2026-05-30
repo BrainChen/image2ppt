@@ -150,10 +150,14 @@ class SlideDocument(BaseModel):
         metadata = raw.get("metadata", {}) if isinstance(raw.get("metadata"), dict) else {}
         document = cls(slide=slide, metadata=metadata)
         normalization = normalize_bboxes_to_image(document)
+        document.metadata = {
+            **document.metadata,
+            "coordinate_space": image_pixel_coordinate_space(document),
+        }
         if normalization:
             document.metadata = {
                 **document.metadata,
-                "bbox_normalization": normalization.to_metadata(),
+                "input_bbox_normalization": normalization.to_metadata(),
             }
         return document
 
@@ -182,6 +186,10 @@ class SlideDocument(BaseModel):
             return
         for node in self.walk():
             node.bbox = clamp_bbox(node.bbox, self.slide.image_width, self.slide.image_height)
+        self.metadata = {
+            **self.metadata,
+            "coordinate_space": image_pixel_coordinate_space(self),
+        }
 
 
 class _NormalizeContext:
@@ -319,10 +327,11 @@ def normalize_bboxes_to_image(document: SlideDocument) -> BboxNormalization | No
 
     input_format = infer_bbox_input_format(nodes)
     boxes = [bbox_to_xywh(node.bbox, input_format) for node in nodes]
-    max_x = max((box[0] + box[2] for box in boxes), default=0.0)
-    max_y = max((box[1] + box[3] for box in boxes), default=0.0)
-    source_width = infer_coordinate_extent(max_x, float(image_width))
-    source_height = infer_coordinate_extent(max_y, float(image_height))
+    source_width, source_height = infer_coordinate_extents(
+        boxes,
+        float(image_width),
+        float(image_height),
+    )
     scale_x = float(image_width) / source_width if source_width > 0 else 1.0
     scale_y = float(image_height) / source_height if source_height > 0 else 1.0
 
@@ -382,6 +391,109 @@ def bbox_to_xywh(bbox: list[float], input_format: str) -> list[float]:
     return [x, y, max(0.0, third), max(0.0, fourth)]
 
 
+def normalize_bbox_items_to_image(
+    items: list[dict[str, Any]],
+    image_width: int | None,
+    image_height: int | None,
+) -> BboxNormalization | None:
+    if not image_width or not image_height:
+        return None
+
+    boxes: list[list[float]] = []
+    item_by_box: list[dict[str, Any]] = []
+    for item in items:
+        bbox = item.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            continue
+        boxes.append([float(bbox[0]), float(bbox[1]), max(0.0, float(bbox[2])), max(0.0, float(bbox[3]))])
+        item_by_box.append(item)
+    if not boxes:
+        return None
+    if len(boxes) < 3:
+        for item, box in zip(item_by_box, boxes, strict=True):
+            item["bbox"] = clamp_bbox(box, image_width, image_height)
+        return None
+
+    source_width, source_height = infer_coordinate_extents(boxes, float(image_width), float(image_height))
+    scale_x = float(image_width) / source_width if source_width > 0 else 1.0
+    scale_y = float(image_height) / source_height if source_height > 0 else 1.0
+
+    changed = not math.isclose(scale_x, 1.0) or not math.isclose(scale_y, 1.0)
+    for item, box in zip(item_by_box, boxes, strict=True):
+        x, y, width, height = box
+        item["bbox"] = clamp_bbox(
+            [x * scale_x, y * scale_y, width * scale_x, height * scale_y],
+            image_width,
+            image_height,
+        )
+
+    if not changed:
+        return None
+    return BboxNormalization(
+        input_format="xywh",
+        source_width=source_width,
+        source_height=source_height,
+        scale_x=scale_x,
+        scale_y=scale_y,
+    )
+
+
+def image_pixel_coordinate_space(document: SlideDocument) -> dict[str, Any]:
+    return {
+        "unit": "px",
+        "origin": "top-left",
+        "width": document.slide.image_width,
+        "height": document.slide.image_height,
+        "baseline": "source_image",
+    }
+
+
+def infer_coordinate_extents(boxes: list[list[float]], image_width: float, image_height: float) -> tuple[float, float]:
+    x_values: list[float] = []
+    y_values: list[float] = []
+    for x, y, width, height in boxes:
+        x_values.extend([x, x + width])
+        y_values.extend([y, y + height])
+    return (
+        infer_coordinate_extent_from_values(x_values, image_width),
+        infer_coordinate_extent_from_values(y_values, image_height),
+    )
+
+
+def infer_coordinate_extent_from_values(values: list[float], image_extent: float) -> float:
+    coordinates = sorted(value for value in values if math.isfinite(value) and value > 0)
+    if not coordinates or image_extent <= 0:
+        return image_extent
+
+    pixel_extent_hits = sum(1 for value in coordinates if value >= image_extent * 0.72)
+    if pixel_extent_hits / len(coordinates) >= 0.25:
+        return image_extent
+
+    best_extent = image_extent
+    best_score = 0.0
+    for candidate in COMMON_COORDINATE_EXTENTS:
+        if candidate >= image_extent * 0.9:
+            continue
+        inliers = [value for value in coordinates if value <= candidate]
+        if not inliers:
+            continue
+        inlier_ratio = len(inliers) / len(coordinates)
+        inlier_max = max(inliers)
+        if inlier_ratio < 0.75 or inlier_max < candidate * 0.55:
+            continue
+        boundary_hits = sum(1 for value in inliers if value >= candidate * 0.75)
+        overflow_ratio = 1.0 - inlier_ratio
+        score = boundary_hits / len(coordinates) - overflow_ratio
+        if score > best_score:
+            best_extent = float(candidate)
+            best_score = score
+    if best_extent != image_extent:
+        return best_extent
+
+    robust_coordinate = percentile(coordinates, 0.8)
+    return infer_coordinate_extent(robust_coordinate, image_extent)
+
+
 def infer_coordinate_extent(max_coordinate: float, image_extent: float) -> float:
     if max_coordinate <= 0 or image_extent <= 0:
         return image_extent
@@ -394,6 +506,20 @@ def infer_coordinate_extent(max_coordinate: float, image_extent: float) -> float
         if max_coordinate <= candidate and max_coordinate >= candidate * 0.55:
             return float(candidate)
     return image_extent
+
+
+def percentile(values: list[float], ratio: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return values[0]
+    index = min(max(ratio, 0.0), 1.0) * (len(values) - 1)
+    lower = math.floor(index)
+    upper = math.ceil(index)
+    if lower == upper:
+        return values[lower]
+    fraction = index - lower
+    return values[lower] * (1.0 - fraction) + values[upper] * fraction
 
 
 def clamp_bbox(bbox: list[float], image_width: int, image_height: int) -> list[float]:

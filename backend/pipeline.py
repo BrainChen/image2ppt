@@ -6,14 +6,15 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
 
 from PIL import Image, ImageDraw, ImageFont
 
 from backend.agents.image_agent import ImageExtractor
 from backend.agents.layout_agent import LayoutAgent
 from backend.agents.ocr_agent import OcrAgent, merge_ocr_items
+from backend.agents.raw_image_preprocessor import RawImagePreprocessor
 from backend.agents.reasoning_agent import ReasoningAgent
 from backend.agents.style_agent import StyleExtractor
 from backend.ast.slide_ast import SlideDocument, SlideElement, Style
@@ -34,9 +35,14 @@ class ConversionResult:
     artifact_dir: Path
 
 
+def make_timestamp_id() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+
 def convert_image_to_ppt(
     image_path: str | Path,
     *,
+    conversion_id: str | None = None,
     ast_path: str | Path | None = None,
     pptx_path: str | Path | None = None,
     crop_dir: str | Path | None = None,
@@ -49,18 +55,21 @@ def convert_image_to_ppt(
     use_reasoning: bool | None = None,
     skip_compile: bool = False,
     mock_layout: bool = False,
+    preprocess_raw_image: bool = False,
 ) -> ConversionResult:
     configure_logging()
-    run_id = uuid4().hex[:8]
+    run_id = conversion_id or make_timestamp_id()
     requested_image_path = Path(image_path)
     image_path = resolve_image_path(requested_image_path)
     if image_path != requested_image_path:
         logger.warning("image.path_resolved %s", format_kv(run_id=run_id, requested=requested_image_path, resolved=image_path))
 
-    ast_path = Path(ast_path) if ast_path else PROJECT_ROOT / "outputs" / "ast" / f"{image_path.stem}_ast.json"
-    pptx_path = Path(pptx_path) if pptx_path else PROJECT_ROOT / "outputs" / "ppt" / f"{image_path.stem}.pptx"
-    crop_dir = Path(crop_dir) if crop_dir else PROJECT_ROOT / "outputs" / "crops" / image_path.stem
-    artifact_dir = Path(artifact_dir) if artifact_dir else PROJECT_ROOT / "outputs" / "intermediates" / image_path.stem / run_id
+    source_image_path = image_path
+    output_stem = f"{image_path.stem}_{run_id}"
+    ast_path = Path(ast_path) if ast_path else PROJECT_ROOT / "outputs" / "ast" / f"{output_stem}_ast.json"
+    pptx_path = Path(pptx_path) if pptx_path else PROJECT_ROOT / "outputs" / "ppt" / f"{output_stem}.pptx"
+    crop_dir = Path(crop_dir) if crop_dir else PROJECT_ROOT / "outputs" / "crops" / output_stem
+    artifact_dir = Path(artifact_dir) if artifact_dir else PROJECT_ROOT / "outputs" / "intermediates" / output_stem
     ast_path.parent.mkdir(parents=True, exist_ok=True)
     crop_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -68,10 +77,41 @@ def convert_image_to_ppt(
         pptx_path.parent.mkdir(parents=True, exist_ok=True)
     ocr_failure_mode = resolve_ocr_failure_mode(ocr_failure_mode)
 
+    preprocessed_image_path: Path | None = None
+    if preprocess_raw_image:
+        preprocessed_image_path = artifact_dir / "00_raw_image_preprocess" / f"{source_image_path.stem}_ppt.jpg"
+        try:
+            with log_stage(logger, "raw_image_preprocess", run_id=run_id, image=source_image_path, output=preprocessed_image_path):
+                preprocessor = RawImagePreprocessor()
+                image_path = preprocessor.convert_to_ppt_style_image(source_image_path, preprocessed_image_path)
+            write_json_artifact(
+                artifact_dir,
+                "00_raw_image_preprocess.json",
+                {
+                    "source_image": str(source_image_path),
+                    "preprocessed_image": str(preprocessed_image_path),
+                    "model": preprocessor.model,
+                    "base_url": preprocessor.base_url,
+                    "response": preprocessor.last_response_info,
+                },
+            )
+        except Exception as exc:
+            write_json_artifact(
+                artifact_dir,
+                "00_raw_image_preprocess_error.json",
+                {
+                    "source_image": str(source_image_path),
+                    "target_image": str(preprocessed_image_path),
+                    "error": exception_to_artifact(exc),
+                },
+            )
+            raise
+
     logger.info(
         "conversion.start %s",
         format_kv(
             run_id=run_id,
+            source_image=source_image_path,
             image=image_path,
             ast=ast_path,
             pptx=pptx_path,
@@ -83,6 +123,7 @@ def convert_image_to_ppt(
             use_reasoning=use_reasoning,
             skip_compile=skip_compile,
             mock_layout=mock_layout,
+            preprocess_raw_image=preprocess_raw_image,
         ),
     )
     write_json_artifact(
@@ -91,7 +132,9 @@ def convert_image_to_ppt(
         {
             "run_id": run_id,
             "requested_image": str(requested_image_path),
-            "resolved_image": str(image_path),
+            "resolved_image": str(source_image_path),
+            "effective_image": str(image_path),
+            "preprocessed_image": str(preprocessed_image_path) if preprocessed_image_path else None,
             "ast_path": str(ast_path),
             "pptx_path": str(pptx_path) if pptx_path else None,
             "crop_dir": str(crop_dir),
@@ -105,6 +148,7 @@ def convert_image_to_ppt(
                 "use_reasoning": use_reasoning,
                 "skip_compile": skip_compile,
                 "mock_layout": mock_layout,
+                "preprocess_raw_image": preprocess_raw_image,
             },
         },
     )
@@ -141,6 +185,7 @@ def convert_image_to_ppt(
             finally:
                 write_text_artifact(artifact_dir, "02_layout_raw_response.txt", layout_agent.last_raw_response or "")
                 write_json_artifact(artifact_dir, "02_layout_model.json", {"model": layout_agent.model, "base_url": layout_agent.base_url})
+    document.clamp_to_image()
     logger.info("ast.after_layout %s", format_kv(run_id=run_id, nodes=len(document.walk())))
     write_document_artifact(artifact_dir, "02_after_layout_ast.json", document)
     write_bbox_overlay_artifact(artifact_dir, "02_after_layout_boxes.png", image_path, document)
@@ -157,6 +202,7 @@ def convert_image_to_ppt(
                     write_json_artifact(artifact_dir, "03_ocr_model.json", {"model": ocr_agent.model, "base_url": ocr_agent.base_url})
                 write_json_artifact(artifact_dir, "03_ocr_items.json", {"items": ocr_items})
                 merge_ocr_items(document, ocr_items)
+                document.clamp_to_image()
         except Exception as exc:
             write_json_artifact(
                 artifact_dir,
@@ -177,6 +223,7 @@ def convert_image_to_ppt(
                 format_kv(run_id=run_id, error_type=exc.__class__.__name__, error=str(exc)),
             )
         logger.info("ast.after_ocr %s", format_kv(run_id=run_id, ocr_items=len(ocr_items), nodes=len(document.walk())))
+        document.clamp_to_image()
         write_document_artifact(artifact_dir, "03_after_ocr_ast.json", document)
         write_bbox_overlay_artifact(artifact_dir, "03_after_ocr_boxes.png", image_path, document)
     else:
@@ -193,6 +240,7 @@ def convert_image_to_ppt(
             finally:
                 write_text_artifact(artifact_dir, "04_reasoning_raw_response.txt", reasoning_agent.last_raw_response or "")
                 write_json_artifact(artifact_dir, "04_reasoning_model.json", {"model": reasoning_agent.model, "base_url": reasoning_agent.base_url})
+        document.clamp_to_image()
         logger.info("ast.after_reasoning %s", format_kv(run_id=run_id, before_nodes=before_nodes, nodes=len(document.walk())))
         write_document_artifact(artifact_dir, "04_after_reasoning_ast.json", document)
         write_bbox_overlay_artifact(artifact_dir, "04_after_reasoning_boxes.png", image_path, document)
@@ -202,10 +250,12 @@ def convert_image_to_ppt(
 
     with log_stage(logger, "style_extract", run_id=run_id):
         StyleExtractor().apply(document, image_path)
+    document.clamp_to_image()
     write_document_artifact(artifact_dir, "05_after_style_ast.json", document)
     write_bbox_overlay_artifact(artifact_dir, "05_after_style_boxes.png", image_path, document)
     with log_stage(logger, "image_extract", run_id=run_id, crop_dir=crop_dir):
         ImageExtractor().extract(document, image_path, crop_dir)
+    document.clamp_to_image()
     write_document_artifact(artifact_dir, "06_after_image_extract_ast.json", document)
     write_bbox_overlay_artifact(artifact_dir, "06_after_image_extract_boxes.png", image_path, document)
     write_json_artifact(artifact_dir, "06_crops.json", {"crops": image_crop_paths(document)})
@@ -252,6 +302,43 @@ def resolve_image_path(image_path: str | Path) -> Path:
         candidate_text = ", ".join(str(candidate) for candidate in candidates)
         raise FileNotFoundError(f"Image not found: {requested_path}. Multiple same-stem candidates found: {candidate_text}")
     raise FileNotFoundError(f"Image not found: {requested_path}. Check the file name or extension.")
+
+
+def collect_input_images(input_path: str | Path) -> list[Path]:
+    requested_path = Path(input_path)
+    if requested_path.is_dir():
+        images = sorted(
+            path
+            for path in requested_path.iterdir()
+            if path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+        )
+        if not images:
+            extensions = ", ".join(SUPPORTED_IMAGE_EXTENSIONS)
+            raise FileNotFoundError(f"No supported image files found in directory: {requested_path}. Supported: {extensions}")
+        return images
+    return [resolve_image_path(requested_path)]
+
+
+def batch_output_file(base_path: str | Path | None, output_stem: str, suffix: str, option_name: str) -> Path | None:
+    if not base_path:
+        return None
+
+    base = Path(base_path)
+    if base.suffix:
+        raise ValueError(f"{option_name} must be a directory when input is a folder.")
+    return base / f"{output_stem}{suffix}"
+
+
+def batch_output_dir(base_path: str | Path | None, output_stem: str) -> Path | None:
+    if not base_path:
+        return None
+    return Path(base_path) / output_stem
+
+
+def should_preprocess_raw_image(value: bool | None, input_path: Path, image_path: Path) -> bool:
+    if value is not None:
+        return value
+    return input_path.name == "raw-images" or image_path.parent.name == "raw-images"
 
 
 def resolve_ocr_failure_mode(value: str | None) -> str:
@@ -478,12 +565,12 @@ def create_mock_document(image_width: int, image_height: int, slide_width: float
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Convert a slide image into editable PPTX.")
-    parser.add_argument("image", help="Input slide image path")
-    parser.add_argument("--ast", dest="ast_path", help="Output Slide AST JSON path")
-    parser.add_argument("--out", dest="pptx_path", help="Output PPTX path")
-    parser.add_argument("--crop-dir", help="Directory for extracted image/icon crops")
-    parser.add_argument("--artifact-dir", help="Directory for intermediate artifacts")
+    parser = argparse.ArgumentParser(description="Convert slide image(s) into editable PPTX.")
+    parser.add_argument("input", help="Input slide image path or directory containing images")
+    parser.add_argument("--ast", dest="ast_path", help="Output Slide AST JSON path, or directory for folder input")
+    parser.add_argument("--out", dest="pptx_path", help="Output PPTX path, or directory for folder input")
+    parser.add_argument("--crop-dir", help="Directory for extracted image/icon crops; folder input creates one subdirectory per image")
+    parser.add_argument("--artifact-dir", help="Directory for intermediate artifacts; folder input creates one subdirectory per image")
     parser.add_argument("--layout-json", help="Use an existing layout JSON instead of calling the VLM")
     parser.add_argument("--slide-width", type=float, default=13.33, help="PPT slide width in inches")
     parser.add_argument("--slide-height", type=float, default=7.5, help="PPT slide height in inches")
@@ -499,6 +586,20 @@ def parse_args() -> argparse.Namespace:
     reasoning_group.add_argument("--skip-reasoning", dest="use_reasoning", action="store_false", help="Disable reasoning AST refinement")
     parser.add_argument("--skip-compile", action="store_true", help="Only generate AST and crops")
     parser.add_argument("--mock-layout", action="store_true", help="Use a deterministic mock layout for smoke tests")
+    raw_image_group = parser.add_mutually_exclusive_group()
+    raw_image_group.add_argument(
+        "--preprocess-raw-images",
+        dest="preprocess_raw_images",
+        action="store_true",
+        default=None,
+        help="Convert raw photos to PPT-style slide images with Nanobanana Pro before all pipeline nodes",
+    )
+    raw_image_group.add_argument(
+        "--no-preprocess-raw-images",
+        dest="preprocess_raw_images",
+        action="store_false",
+        help="Disable automatic raw image preprocessing",
+    )
     parser.add_argument("--log-level", default=None, help="Logging level, e.g. DEBUG, INFO, WARNING")
     parser.add_argument("--log-file", default=None, help="Log file path. Default: outputs/logs/img2ppt.log")
     return parser.parse_args()
@@ -508,28 +609,56 @@ def main() -> None:
     args = parse_args()
     log_file = configure_logging(level=args.log_level, log_file=args.log_file)
     logger.info("cli.start %s", format_kv(log_file=log_file))
-    result = convert_image_to_ppt(
-        args.image,
-        ast_path=args.ast_path,
-        pptx_path=args.pptx_path,
-        crop_dir=args.crop_dir,
-        artifact_dir=args.artifact_dir,
-        layout_json=args.layout_json,
-        slide_width=args.slide_width,
-        slide_height=args.slide_height,
-        skip_ocr=args.skip_ocr,
-        ocr_failure_mode=args.ocr_failure_mode,
-        use_reasoning=args.use_reasoning,
-        skip_compile=args.skip_compile,
-        mock_layout=args.mock_layout,
-    )
+    input_path = Path(args.input)
+    image_paths = collect_input_images(input_path)
+    is_batch = input_path.is_dir()
+    logger.info("cli.inputs %s", format_kv(input=args.input, images=len(image_paths), batch=is_batch))
+
+    results: list[ConversionResult] = []
+    for image_path in image_paths:
+        conversion_id = make_timestamp_id() if is_batch else None
+        output_stem = f"{image_path.stem}_{conversion_id}" if conversion_id else image_path.stem
+        preprocess_raw_image = should_preprocess_raw_image(args.preprocess_raw_images, input_path, image_path)
+        logger.info(
+            "cli.convert_image %s",
+            format_kv(image=image_path, conversion_id=conversion_id, preprocess_raw_image=preprocess_raw_image),
+        )
+        result = convert_image_to_ppt(
+            image_path,
+            conversion_id=conversion_id,
+            ast_path=batch_output_file(args.ast_path, output_stem, "_ast.json", "--ast") if is_batch else args.ast_path,
+            pptx_path=batch_output_file(args.pptx_path, output_stem, ".pptx", "--out") if is_batch else args.pptx_path,
+            crop_dir=batch_output_dir(args.crop_dir, output_stem) if is_batch else args.crop_dir,
+            artifact_dir=batch_output_dir(args.artifact_dir, output_stem) if is_batch else args.artifact_dir,
+            layout_json=args.layout_json,
+            slide_width=args.slide_width,
+            slide_height=args.slide_height,
+            skip_ocr=args.skip_ocr,
+            ocr_failure_mode=args.ocr_failure_mode,
+            use_reasoning=args.use_reasoning,
+            skip_compile=args.skip_compile,
+            mock_layout=args.mock_layout,
+            preprocess_raw_image=preprocess_raw_image,
+        )
+        results.append(result)
+
     print(
         json.dumps(
-            {
-                "ast": str(result.ast_path),
-                "pptx": str(result.pptx_path) if result.pptx_path else None,
-                "crops": str(result.crop_dir),
-                "artifacts": str(result.artifact_dir),
+            [
+                {
+                    "ast": str(result.ast_path),
+                    "pptx": str(result.pptx_path) if result.pptx_path else None,
+                    "crops": str(result.crop_dir),
+                    "artifacts": str(result.artifact_dir),
+                }
+                for result in results
+            ]
+            if is_batch
+            else {
+                "ast": str(results[0].ast_path),
+                "pptx": str(results[0].pptx_path) if results[0].pptx_path else None,
+                "crops": str(results[0].crop_dir),
+                "artifacts": str(results[0].artifact_dir),
             },
             ensure_ascii=False,
             indent=2,

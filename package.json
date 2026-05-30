@@ -2,6 +2,7 @@
   "name": "img2ppt",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "compile:pptx": "tsx backend/compiler/ppt_compiler.ts",

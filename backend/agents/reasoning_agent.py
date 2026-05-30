@@ -50,8 +50,11 @@ Hard rules:
 - Do NOT invent new visible content.
 - Do NOT materially change text content.
 - Do NOT materially change bbox coordinates.
+- All bbox values are already in original source image pixels.
+- Preserve the original image pixel coordinate space until PPT compilation.
 - Do NOT remove image_path values.
 - Preserve slide size, image_width, and image_height.
+- Preserve metadata.coordinate_space when present.
 - Preserve style fields when present.
 
 Slide AST:

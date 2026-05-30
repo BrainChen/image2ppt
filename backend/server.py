@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse
 
-from backend.pipeline import PROJECT_ROOT, convert_image_to_ppt
+from backend.pipeline import PROJECT_ROOT, convert_image_to_ppt, make_timestamp_id
 from backend.utils.logging_config import configure_logging, format_kv
 
 
@@ -29,11 +28,13 @@ async def convert(
     use_reasoning: bool | None = Form(None),
     mock_layout: bool = Form(False),
 ) -> FileResponse:
-    request_id = uuid4().hex[:8]
+    request_id = make_timestamp_id()
     suffix = Path(file.filename or "slide.png").suffix or ".png"
+    source_stem = Path(file.filename or "slide").stem or "slide"
+    output_stem = f"{source_stem}_{request_id}"
     upload_dir = PROJECT_ROOT / "outputs" / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
-    image_path = upload_dir / f"{request_id}{suffix}"
+    image_path = upload_dir / f"{output_stem}{suffix}"
     content = await file.read()
     image_path.write_bytes(content)
     logger.info(
@@ -49,10 +50,13 @@ async def convert(
         ),
     )
 
-    output_path = PROJECT_ROOT / "outputs" / "ppt" / f"{image_path.stem}.pptx"
     result = convert_image_to_ppt(
         image_path,
-        pptx_path=output_path,
+        conversion_id=request_id,
+        ast_path=PROJECT_ROOT / "outputs" / "ast" / f"{output_stem}_ast.json",
+        pptx_path=PROJECT_ROOT / "outputs" / "ppt" / f"{output_stem}.pptx",
+        crop_dir=PROJECT_ROOT / "outputs" / "crops" / output_stem,
+        artifact_dir=PROJECT_ROOT / "outputs" / "intermediates" / output_stem,
         skip_ocr=skip_ocr,
         ocr_failure_mode=ocr_failure_mode,
         use_reasoning=use_reasoning,

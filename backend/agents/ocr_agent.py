@@ -15,6 +15,7 @@ from backend.ast.slide_ast import (
     bbox_center_inside,
     bbox_iou,
     distance_between_bboxes,
+    normalize_bbox_items_to_image,
 )
 from backend.utils.json_utils import extract_json_object
 from backend.utils.logging_config import format_kv
@@ -41,8 +42,11 @@ Output ONLY valid JSON:
 }
 
 Rules:
-- bbox must be absolute image pixels, origin top-left.
+- bbox must be absolute original image pixels, origin top-left.
+- Do NOT output coordinates from a 0-1000, normalized, resized, or display coordinate space.
+- If you estimate positions on any temporary grid, convert every bbox back to original image pixels before output.
 - Preserve line breaks inside a text block when visually grouped.
+- Encode line breaks inside JSON strings as \\n; never put literal newlines inside a JSON string.
 - Do not describe graphics.
 - Do not extract decorative illegible text.
 """
@@ -91,6 +95,7 @@ class OcrAgent:
         raw = extract_json_object(self.last_raw_response)
         items = raw.get("items", [])
         normalized_items = items if isinstance(items, list) else []
+        normalize_bbox_items_to_image(normalized_items, image_width, image_height)
         logger.info("ocr_agent.extracted %s", format_kv(items=len(normalized_items)))
         return normalized_items
 

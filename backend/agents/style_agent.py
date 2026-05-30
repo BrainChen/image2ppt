@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import cv2
@@ -11,6 +12,7 @@ from backend.utils.logging_config import format_kv
 
 
 logger = logging.getLogger(__name__)
+LIST_MARKER_PATTERN = re.compile(r"^\s*[•●◦○▪■□‣⁃\-–—]\s+", re.MULTILINE)
 
 
 class StyleExtractor:
@@ -47,10 +49,13 @@ class StyleExtractor:
             elif node.type == "text":
                 bg = dominant_hex(region)
                 node.style.color = node.style.color or text_color_hex(region, bg)
-                node.style.fontSize = node.style.fontSize or estimate_font_size(node, document)
-                if not node.style.fontWeight and (node.metadata.get("role") == "title" or node.bbox[3] > image.shape[0] * 0.045):
+                node.style.fontSize = estimate_font_size(node, document, region)
+                role = str(node.metadata.get("role") or "").lower()
+                is_list = is_unordered_list_text(node.text or "") or role == "bullet"
+                is_large_single_line = "\n" not in (node.text or "") and node.bbox[3] > image.shape[0] * 0.045
+                if not node.style.fontWeight and (role in {"title", "heading"} or (is_large_single_line and not is_list)):
                     node.style.fontWeight = "bold"
-                node.style.align = node.style.align or "center"
+                node.style.align = infer_text_align(node, region)
             elif node.type == "line":
                 background = document.slide.background.fill or "#ffffff"
                 node.style.stroke = node.style.stroke or dominant_hex(region, ignore_hex=background)
@@ -122,11 +127,100 @@ def text_color_hex(region: np.ndarray, background_hex: str) -> str:
     return "#111111" if luminance(background) > 150 else "#ffffff"
 
 
-def estimate_font_size(node: SlideElement, document: SlideDocument) -> float:
+def estimate_font_size(node: SlideElement, document: SlideDocument, region: np.ndarray | None = None) -> float:
+    if region is not None and region.size:
+        visual_size = estimate_font_size_from_ink(region, document)
+        if visual_size is not None:
+            return visual_size
+
     image_height = document.slide.image_height or 900
     line_count = max(1, len((node.text or "").splitlines()))
     height_inches = node.bbox[3] / image_height * document.slide.height
-    return round(max(6.0, min(48.0, height_inches * 72 * 0.58 / line_count)), 1)
+    line_height = height_inches * 72 / line_count
+    ratio = 0.82 if line_count == 1 else 0.74
+    return round(max(5.0, min(60.0, line_height * ratio)), 1)
+
+
+def estimate_font_size_from_ink(region: np.ndarray, document: SlideDocument) -> float | None:
+    mask = text_foreground_mask(region)
+    if mask is None:
+        return None
+
+    height, width = mask.shape
+    min_pixels_per_row = max(2, int(width * 0.008))
+    rows = np.where(mask.sum(axis=1) >= min_pixels_per_row)[0]
+    if len(rows) == 0:
+        return None
+
+    bands: list[tuple[int, int]] = []
+    start = previous = int(rows[0])
+    for row in rows[1:]:
+        current = int(row)
+        if current > previous + 2:
+            bands.append((start, previous))
+            start = current
+        previous = current
+    bands.append((start, previous))
+
+    line_heights = [
+        end - start + 1
+        for start, end in bands
+        if 3 <= end - start + 1 <= max(4, int(height * 0.96))
+    ]
+    if not line_heights:
+        return None
+
+    px_per_point = (document.slide.image_height or 900) / max(1.0, document.slide.height * 72)
+    font_size = float(np.median(line_heights)) / px_per_point
+    if not np.isfinite(font_size):
+        return None
+    return round(max(5.0, min(72.0, font_size)), 1)
+
+
+def infer_text_align(node: SlideElement, region: np.ndarray) -> str:
+    text = node.text or ""
+    role = str(node.metadata.get("role") or "").lower()
+    if is_unordered_list_text(text) or role == "bullet":
+        return "left"
+    if role in {"title", "subtitle", "caption", "footer", "page_number", "heading", "label"}:
+        return "center"
+
+    mask = text_foreground_mask(region)
+    if mask is None:
+        return "center"
+    height, width = mask.shape
+    min_pixels_per_col = max(2, int(height * 0.015))
+    cols = np.where(mask.sum(axis=0) >= min_pixels_per_col)[0]
+    if len(cols) == 0 or width <= 0:
+        return "center"
+
+    left_margin = int(cols[0]) / width
+    right_margin = (width - 1 - int(cols[-1])) / width
+    if left_margin < 0.08 and right_margin > 0.18:
+        return "left"
+    if right_margin < 0.08 and left_margin > 0.18:
+        return "right"
+    return "center"
+
+
+def is_unordered_list_text(text: str) -> bool:
+    return bool(LIST_MARKER_PATTERN.search(text))
+
+
+def text_foreground_mask(region: np.ndarray) -> np.ndarray | None:
+    if region.size == 0:
+        return None
+    background = np.array(hex_to_rgb(dominant_hex(region)), dtype=np.float32)
+    pixels = region.astype(np.float32)
+    distances = np.linalg.norm(pixels - background, axis=2)
+    if not np.isfinite(distances).any():
+        return None
+    adaptive_threshold = float(np.percentile(distances, 88)) * 0.45
+    threshold = max(30.0, min(70.0, adaptive_threshold))
+    mask = distances > threshold
+    if int(mask.sum()) < 8:
+        return None
+    return mask
 
 
 def estimate_line_width(node: SlideElement) -> float:

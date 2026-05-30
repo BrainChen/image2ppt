@@ -172,23 +172,18 @@ function renderText(
   if (!text.trim()) {
     return;
   }
-  const fontSize = Number(style.fontSize || Math.max(6, Math.min(36, box.h * 72 * 0.55)));
+  const isList = isUnorderedListText(text) || node.metadata?.role === "bullet";
+  const fontSize = resolveFontSize(style, box, text);
   const bold = style.fontWeight === "bold" || Number(style.fontWeight) >= 600;
-  slide.addText(text, {
+  const payload = buildTextPayload(text, fontSize);
+  slide.addText(payload, {
+    ...baseTextOptions(style, fontSize, bold, isList),
     x: box.x,
     y: box.y,
     w: box.w,
     h: box.h,
-    margin: 0.03,
-    fit: "shrink",
-    valign: "mid",
-    align: style.align || "center",
-    fontFace: style.fontFamily || "Aptos",
-    fontSize,
-    bold,
-    color: normalizeHex(style.color) || "111111",
-    breakLine: false,
-    paraSpaceAfterPt: 0,
+    valign: isList || text.includes("\n") ? "top" : "mid",
+    align: isList ? "left" : style.align || "center",
   });
 }
 
@@ -227,29 +222,191 @@ function renderShapeWithText(
   const fillColor = normalizeHex(shapeStyle.fill);
   const strokeColor = normalizeHex(shapeStyle.stroke);
   const strokeWidth = Number(shapeStyle.strokeWidth ?? (strokeColor ? 0.75 : 0));
-  const fontSize = Number(textStyle.fontSize || Math.max(6, Math.min(36, box.h * 72 * 0.38)));
+  const isList = isUnorderedListText(textNode.text || "") || textNode.metadata?.role === "bullet";
+  const fontSize = resolveFontSize(textStyle, box, textNode.text || "");
   const bold = textStyle.fontWeight === "bold" || Number(textStyle.fontWeight) >= 600;
-  slide.addText(textNode.text || "", {
+  const payload = buildTextPayload(textNode.text || "", fontSize);
+  slide.addText(payload, {
+    ...baseTextOptions(textStyle, fontSize, bold, isList),
     x: box.x,
     y: box.y,
     w: box.w,
     h: box.h,
     shape: shapeType,
-    margin: 0.04,
-    fit: "shrink",
-    valign: "mid",
-    align: textStyle.align || "center",
-    fontFace: textStyle.fontFamily || "Aptos",
-    fontSize,
-    bold,
-    color: normalizeHex(textStyle.color) || "111111",
+    valign: isList || (textNode.text || "").includes("\n") ? "top" : "mid",
+    align: isList ? "left" : textStyle.align || "center",
     fill: fillColor ? { color: fillColor, transparency: opacityToTransparency(shapeStyle.opacity) } : transparentFill(),
     line:
       strokeColor && strokeWidth > 0
         ? { color: strokeColor, width: strokeWidth }
         : { color: "FFFFFF", transparency: 100, width: 0 },
-    paraSpaceAfterPt: 0,
   });
+}
+
+type RichTextRun = { text: string; options?: Record<string, unknown> };
+
+function baseTextOptions(style: Style, fontSize: number, bold: boolean, isList: boolean): Record<string, unknown> {
+  return {
+    margin: 0,
+    fit: "shrink",
+    fontFace: style.fontFamily || "Aptos",
+    fontSize,
+    bold,
+    color: normalizeHex(style.color) || "111111",
+    breakLine: false,
+    paraSpaceAfterPt: 0,
+    paraSpaceAfter: 0,
+    wrap: true,
+    ...(isList ? { lineSpacingMultiple: 0.95 } : {}),
+  };
+}
+
+function resolveFontSize(
+  style: Style,
+  box: { x: number; y: number; w: number; h: number },
+  text: string,
+): number {
+  const styledSize = Number(style.fontSize || 0);
+  if (styledSize > 0) {
+    return round(Math.max(4, Math.min(72, styledSize)));
+  }
+  const lineCount = Math.max(1, text.split(/\r?\n/).filter((line) => line.trim()).length);
+  const lineHeight = (box.h * 72) / lineCount;
+  const ratio = lineCount === 1 ? 0.82 : 0.74;
+  return round(Math.max(5, Math.min(60, lineHeight * ratio)));
+}
+
+function buildTextPayload(text: string, fontSize: number): string | RichTextRun[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const needsRichText = isUnorderedListText(text) || containsFormulaSyntax(text);
+  if (!needsRichText) {
+    return text;
+  }
+
+  const runs: RichTextRun[] = [];
+  lines.forEach((line, lineIndex) => {
+    const parsedList = parseUnorderedListLine(line);
+    const content = parsedList ? parsedList.content : line;
+    const lineRuns = parseFormulaRuns(content, fontSize);
+
+    lineRuns.forEach((run, runIndex) => {
+      const options = { ...(run.options || {}) };
+      if (parsedList && runIndex === 0) {
+        options.bullet = {
+          characterCode: bulletCharacterCode(parsedList.marker),
+          indent: bulletIndent(fontSize),
+        };
+        options.indentLevel = parsedList.level;
+      }
+      if (lineIndex < lines.length - 1 && runIndex === lineRuns.length - 1) {
+        options.breakLine = true;
+      }
+      runs.push({ text: run.text, options });
+    });
+
+    if (lineRuns.length === 0 && lineIndex < lines.length - 1) {
+      runs.push({ text: "", options: { breakLine: true } });
+    }
+  });
+  return runs;
+}
+
+function parseFormulaRuns(text: string, fontSize: number): RichTextRun[] {
+  const runs: RichTextRun[] = [];
+  let buffer = "";
+  let index = 0;
+  let foundScript = false;
+
+  const flush = () => {
+    if (buffer) {
+      runs.push({ text: buffer });
+      buffer = "";
+    }
+  };
+
+  while (index < text.length) {
+    const char = text[index];
+    if ((char === "_" || char === "^") && index + 1 < text.length && isScriptStart(text[index + 1])) {
+      const script = readScriptText(text, index + 1);
+      if (script.text) {
+        flush();
+        runs.push({
+          text: script.text,
+          options: {
+            [char === "_" ? "subscript" : "superscript"]: true,
+            fontSize: round(Math.max(4, fontSize * 0.72)),
+          },
+        });
+        foundScript = true;
+        index = script.nextIndex;
+        continue;
+      }
+    }
+    buffer += char;
+    index += 1;
+  }
+  flush();
+  return foundScript ? runs : [{ text }];
+}
+
+function readScriptText(text: string, startIndex: number): { text: string; nextIndex: number } {
+  if (text[startIndex] === "{") {
+    const closeIndex = text.indexOf("}", startIndex + 1);
+    if (closeIndex > startIndex + 1) {
+      return { text: text.slice(startIndex + 1, closeIndex), nextIndex: closeIndex + 1 };
+    }
+  }
+  const match = text.slice(startIndex).match(/^[A-Za-z0-9+\-=(),\u0370-\u03ff]+/);
+  if (match?.[0]) {
+    return { text: match[0], nextIndex: startIndex + match[0].length };
+  }
+  return { text: text[startIndex] || "", nextIndex: startIndex + 1 };
+}
+
+function containsFormulaSyntax(text: string): boolean {
+  return /[_^](?:\{[^}]+\}|[A-Za-z0-9\u0370-\u03ff])/.test(text);
+}
+
+function isScriptStart(value: string): boolean {
+  return value === "{" || /[A-Za-z0-9\u0370-\u03ff]/.test(value);
+}
+
+function isUnorderedListText(text: string): boolean {
+  return text.split(/\r?\n/).some((line) => parseUnorderedListLine(line) !== null);
+}
+
+function parseUnorderedListLine(line: string): { marker: string; content: string; level: number } | null {
+  const match = line.match(/^(\s*)([•●◦○▪■□‣⁃\-–—])\s+(.+)$/u);
+  if (!match) {
+    return null;
+  }
+  return {
+    marker: match[2],
+    content: match[3],
+    level: Math.max(0, Math.min(6, Math.floor(match[1].replace(/\t/g, "  ").length / 2))),
+  };
+}
+
+function bulletCharacterCode(marker: string): string {
+  const codeByMarker: Record<string, string> = {
+    "•": "2022",
+    "●": "25CF",
+    "◦": "25E6",
+    "○": "25CB",
+    "▪": "25AA",
+    "■": "25A0",
+    "□": "25A1",
+    "‣": "2023",
+    "⁃": "2043",
+    "-": "2013",
+    "–": "2013",
+    "—": "2014",
+  };
+  return codeByMarker[marker] || "2022";
+}
+
+function bulletIndent(fontSize: number): number {
+  return round(Math.max(9, Math.min(24, fontSize * 0.9)));
 }
 
 function renderImage(
@@ -297,8 +454,7 @@ function mapBox(
   context: { imageWidth: number; imageHeight: number; slideWidth: number; slideHeight: number },
 ): { x: number; y: number; w: number; h: number } {
   const [x, y, w, h] = bbox.map(Number) as [number, number, number, number];
-  const looksLikePixels = context.imageWidth > context.slideWidth * 4 && context.imageHeight > context.slideHeight * 4;
-  if (!looksLikePixels) {
+  if (context.imageWidth <= 0 || context.imageHeight <= 0) {
     return { x, y, w, h };
   }
   return {
