@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>img2ppt</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Raw image → PPT</p>
+          <h1>上传 raw-image，实时查看转换产物</h1>
+          <p class="subtitle">
+            前端会轮询后端任务状态，依次展示 Nanobanana 预处理图、02_after_layout_boxes 图和最终 PPT 截图。
+          </p>
+        </div>
+        <a class="ghost-link" id="health-link" href="/health" target="_blank" rel="noreferrer">服务健康检查</a>
+      </section>
+
+      <section class="panel upload-panel">
+        <form id="upload-form">
+          <label class="drop-zone" id="drop-zone">
+            <input id="file-input" name="file" type="file" accept="image/*" required />
+            <span class="drop-icon">⇪</span>
+            <strong id="file-title">选择或拖入 raw-image 图片</strong>
+            <span id="file-meta">支持 PNG / JPG / WEBP / BMP 等图片</span>
+          </label>
+
+          <div class="options">
+            <label class="token-option">
+              访问令牌
+              <input id="access-token-input" type="password" autocomplete="current-password" placeholder="输入 IMG2PPT_ACCESS_TOKEN" required />
+            </label>
+            <label>
+              <input id="preprocess-input" type="checkbox" checked />
+              启用 Nanobanana raw-image-preprocess
+            </label>
+            <label>
+              <input id="skip-ocr-input" type="checkbox" />
+              跳过 OCR
+            </label>
+            <label>
+              <input id="mock-layout-input" type="checkbox" />
+              使用 mock layout（本地快速验证）
+            </label>
+            <label>
+              Reasoning
+              <select id="reasoning-input">
+                <option value="">自动</option>
+                <option value="true">开启</option>
+                <option value="false">关闭</option>
+              </select>
+            </label>
+          </div>
+
+          <button id="submit-button" type="submit">开始处理</button>
+        </form>
+      </section>
+
+      <section class="status-card" id="status-card">
+        <div>
+          <span class="status-dot" id="status-dot"></span>
+          <strong id="status-text">等待上传</strong>
+        </div>
+        <a id="download-link" class="download-link is-disabled" aria-disabled="true">下载 PPTX</a>
+      </section>
+
+      <section class="grid" aria-label="转换阶段">
+        <article class="stage-card is-ready" data-stage="source">
+          <div class="stage-header">
+            <span>01</span>
+            <h2>上传原图</h2>
+          </div>
+          <div class="preview-box">
+            <img id="source-preview" alt="上传原图预览" />
+            <p class="empty">上传后显示原图</p>
+          </div>
+        </article>
+
+        <article class="stage-card" data-stage="raw_image_preprocess">
+          <div class="stage-header">
+            <span>02</span>
+            <h2>Nanobanana 预处理图</h2>
+          </div>
+          <div class="preview-box">
+            <img alt="Nanobanana 预处理图" />
+            <p class="empty">等待 raw-image-preprocess 产物</p>
+          </div>
+        </article>
+
+        <article class="stage-card" data-stage="layout_boxes">
+          <div class="stage-header">
+            <span>03</span>
+            <h2>02_after_layout_boxes</h2>
+          </div>
+          <div class="preview-box">
+            <img alt="02_after_layout_boxes 图片" />
+            <p class="empty">等待 layout boxes 产物</p>
+          </div>
+        </article>
+
+        <article class="stage-card" data-stage="ppt_preview">
+          <div class="stage-header">
+            <span>04</span>
+            <h2>最终 PPT 截图</h2>
+          </div>
+          <div class="preview-box">
+            <img alt="最终 PPT 截图" />
+            <p class="empty">等待 PPT 编译与截图</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="log-panel">
+        <h2>任务日志</h2>
+        <ol id="event-log"></ol>
+      </section>
+    </main>
+
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

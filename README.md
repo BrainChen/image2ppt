@@ -185,16 +185,35 @@ python -m backend.pipeline images/good1.jpg \
 
 ## API
 
+When exposing the service publicly, configure an access token in `.env`:
+
+```bash
+IMG2PPT_ACCESS_TOKEN=replace-with-a-long-random-token
+```
+
+Protected API endpoints and intermediate output files require the `access_token` parameter. The frontend includes an input field and sends it automatically.
+
 Start the server:
 
 ```bash
 uvicorn backend.server:app --reload
 ```
 
+Build and open the frontend:
+
+```bash
+npm run build:frontend
+uvicorn backend.server:app --reload
+open http://127.0.0.1:8000
+```
+
+The frontend creates async jobs with `POST /api/jobs` and polls `GET /api/jobs/{job_id}`. It shows the Nanobanana image from
+`00_raw_image_preprocess/`, `02_after_layout_boxes.png`, the final PPT preview screenshot, and a PPTX download link when ready.
+
 Upload an image and receive a PPTX:
 
 ```bash
-curl -F "file=@images/good1.jpg" -o result.pptx http://127.0.0.1:8000/convert
+curl -F "access_token=$IMG2PPT_ACCESS_TOKEN" -F "file=@images/good1.jpg" -o result.pptx http://127.0.0.1:8000/convert
 ```
 
 Health check:

@@ -5,6 +5,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "build:frontend": "tsx backend/compiler/build_frontend.ts",
     "compile:pptx": "tsx backend/compiler/ppt_compiler.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -13,6 +14,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "esbuild": "^0.28.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

@@ -187,16 +187,35 @@ python -m backend.pipeline images/good1.jpg \
 
 ## API
 
+如果服务暴露公网，请先在 `.env` 设置访问令牌：
+
+```bash
+IMG2PPT_ACCESS_TOKEN=replace-with-a-long-random-token
+```
+
+受保护的接口和中间产物文件需要携带 `access_token` 参数；前端页面会提供输入框并自动带上该参数。
+
 启动服务：
 
 ```bash
 uvicorn backend.server:app --reload
 ```
 
+构建并访问前端页面：
+
+```bash
+npm run build:frontend
+uvicorn backend.server:app --reload
+open http://127.0.0.1:8000
+```
+
+前端会调用 `POST /api/jobs` 创建异步转换任务，并轮询 `GET /api/jobs/{job_id}`。页面会依次展示
+`00_raw_image_preprocess/` 中的 Nanobanana 预处理图、`02_after_layout_boxes.png`、最终 PPT 截图，并在完成后提供 PPTX 下载。
+
 上传图片并返回 PPTX：
 
 ```bash
-curl -F "file=@images/good1.jpg" -o result.pptx http://127.0.0.1:8000/convert
+curl -F "access_token=$IMG2PPT_ACCESS_TOKEN" -F "file=@images/good1.jpg" -o result.pptx http://127.0.0.1:8000/convert
 ```
 
 健康检查：
